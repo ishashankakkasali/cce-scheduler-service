@@ -115,6 +115,7 @@ cce:
     leader-retry-interval: ${SCHEDULER_LEADER_RETRY:5000}
     advisory-lock-key: ${SCHEDULER_LOCK_KEY:100001}
     total-partitions: ${SCHEDULER_TOTAL_PARTITIONS:1}
+    lock-acquire-delay-ms: ${SCHEDULER_LOCK_ACQUIRE_DELAY:50}
   kafka:
     topics:
       scheduler-triggers: ${KAFKA_TOPIC_SCHEDULER_TRIGGERS:cce.scheduler.triggers}

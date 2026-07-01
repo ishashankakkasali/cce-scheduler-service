@@ -137,6 +137,7 @@ All properties are under the `cce.scheduler` prefix.
 | `leader-retry-interval` | `long` (ms) | `5000` | `1000` | `60000` | How often standby retries advisory lock |
 | `advisory-lock-key` | `long` | `100001` | — | — | Base PostgreSQL advisory lock key. Partitions use keys `advisory-lock-key + 0` through `advisory-lock-key + total-partitions - 1`. |
 | `total-partitions` | `int` | `1` | `1` | `64` | Number of scan partitions. Each partition is an independent advisory lock. `1` = single-leader mode (default). Increase for horizontal scaling. Each instance acquires **all available** partition locks (greedy), so fewer instances than partitions is safe — no orphaned partitions. |
+| `lock-acquire-delay-ms` | `int` | `50` | `0` | `500` | Max randomized jitter (ms) between consecutive advisory lock acquisition attempts during startup. Allows concurrent instances to interleave lock acquisitions for fairer partition distribution. Set to `0` to disable. |
 
 ---
 
