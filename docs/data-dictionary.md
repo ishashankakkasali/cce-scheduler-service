@@ -8,7 +8,7 @@ Comprehensive reference for all database tables, entities, enums, Kafka message 
 
 ### 1.1 `scheduler_lease` — Partition Leader Election & Heartbeat
 
-Multi-row table used for distributed partitioned leader election and heartbeat tracking. One row exists **per partition** (default: 1 row when `total-partitions=1`). A single instance may own and update **multiple** partition rows via greedy lock acquisition.
+Multi-row table used for distributed partitioned leader election and heartbeat tracking. One row exists **per partition** (default: 1 row when `total-partitions=1`). A single instance may own and update **multiple** partition rows, but never more than its fair share (`ceil(total-partitions / active-instances)`; see `scheduler_node` below).
 
 **Migration:** `V1__create_scheduler_lease.sql`  
 **Owner:** Scheduler Service (read-write)
@@ -41,7 +41,33 @@ CREATE TABLE scheduler_lease (
 INSERT INTO scheduler_lease (id, partition_index) VALUES (gen_random_uuid(), 0);
 ```
 
-### 1.2 `step_instance` — Read-Only View (Owned by Compliance Service)
+### 1.2 `scheduler_node` — Live-Instance Registry (Fair-Share Sizing)
+
+One row per **live scheduler instance** — including standbys that currently own no partitions. Every instance upserts its heartbeat each leader-election cycle; rows whose heartbeat is older than `lease-duration-seconds` are pruned. Instances count the fresh rows to derive the cluster size and, from it, their fair share of partitions (`ceil(total-partitions / active-instances)`). Without this registry a standby would be invisible and the instance that booted first would greedily hold every partition.
+
+**Migration:** `V2__create_scheduler_node.sql`  
+**Owner:** Scheduler Service (read-write)
+
+| Column | Type | Nullable | Default | Description |
+|--------|------|----------|---------|-------------|
+| `node_id` | `VARCHAR` | No | — | Primary key — the instance's `leaderId` (a per-process UUID). |
+| `last_heartbeat` | `TIMESTAMPTZ` | No | — | Last time this instance reported in. Rows older than `lease-duration-seconds` are pruned and excluded from the active count. |
+| `owned_count` | `INTEGER` | No | `0` | Number of partitions this instance currently owns (observability). |
+
+**Constraints:**
+- `PK`: `node_id`
+
+```sql
+CREATE TABLE scheduler_node (
+    node_id        VARCHAR PRIMARY KEY,
+    last_heartbeat TIMESTAMPTZ NOT NULL,
+    owned_count    INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX idx_scheduler_node_heartbeat ON scheduler_node (last_heartbeat);
+```
+
+### 1.3 `step_instance` — Read-Only View (Owned by Compliance Service)
 
 The Scheduler reads this table to find steps that need time-based transitions. **The Scheduler never writes to this table.**
 
@@ -136,8 +162,8 @@ All properties are under the `cce.scheduler` prefix.
 | `lease-duration-seconds` | `int` | `30` | `10` | `300` | Lease expiry for leader heartbeat |
 | `leader-retry-interval` | `long` (ms) | `5000` | `1000` | `60000` | How often standby retries advisory lock |
 | `advisory-lock-key` | `long` | `100001` | — | — | Base PostgreSQL advisory lock key. Partitions use keys `advisory-lock-key + 0` through `advisory-lock-key + total-partitions - 1`. |
-| `total-partitions` | `int` | `1` | `1` | `64` | Number of scan partitions. Each partition is an independent advisory lock. `1` = single-leader mode (default). Increase for horizontal scaling. Each instance acquires **all available** partition locks (greedy), so fewer instances than partitions is safe — no orphaned partitions. |
-| `lock-acquire-delay-ms` | `int` | `50` | `0` | `500` | Max randomized jitter (ms) between consecutive advisory lock acquisition attempts during startup. Allows concurrent instances to interleave lock acquisitions for fairer partition distribution. Set to `0` to disable. |
+| `total-partitions` | `int` | `1` | `1` | `64` | Number of scan partitions. Each partition is an independent advisory lock. `1` = single-leader mode (default). Increase for horizontal scaling. Each instance owns at most its fair share (`ceil(total-partitions / active-instances)`), so fewer instances than partitions is safe — no orphaned partitions. |
+| `lock-acquire-delay-ms` | `int` | `50` | `0` | `500` | Max randomized jitter (ms) between consecutive advisory lock acquisition attempts, to stagger truly simultaneous starts. Secondary smoothing only — even distribution is enforced by the fair-share cap, not this delay. Set to `0` to disable. |
 
 ---
 

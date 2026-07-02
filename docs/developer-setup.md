@@ -30,7 +30,7 @@ cd cce-scheduler-service
 
 ### 2.2 Start Infrastructure
 
-PostgreSQL, Kafka, and the shared database (`cce_collector`) are deployed by the **CCE Collector Service**. All CCE services share the same database.
+PostgreSQL, Kafka, and the shared database (`ccedb`) are deployed by the **CCE Collector Service**. All CCE services share the same database.
 
 ```bash
 # Start shared infrastructure (PostgreSQL on port 5433 + Kafka on port 9092)
@@ -43,14 +43,14 @@ docker compose ps
 
 ### 2.3 Shared Database Requirement
 
-The Scheduler Service connects to the **same PostgreSQL database** (`cce_collector`) as all other CCE services. The database and infrastructure are deployed by the **CCE Collector Service**. The `step_instance` table must exist before the Scheduler can function.
+The Scheduler Service connects to the **same PostgreSQL database** (`ccedb`) as all other CCE services. The database and infrastructure are deployed by the **CCE Collector Service**. The `step_instance` table must exist before the Scheduler can function.
 
 **Development options:**
 1. **Run Compliance Service first** — its Flyway migrations create all tables including `step_instance`
 2. **Use init script** — apply the Compliance Service schema manually before starting the Scheduler
 3. **Testcontainers** — integration tests include init scripts that create both schemas
 
-The Scheduler's own Flyway migration (`V1__create_scheduler_lease.sql`) creates only the `scheduler_lease` table.
+The Scheduler's own Flyway migrations create only its own tables: `V1__create_scheduler_lease.sql` (`scheduler_lease`) and `V2__create_scheduler_node.sql` (`scheduler_node`, the live-instance registry used for fair-share partition sizing).
 
 ### 2.4 Run the Application
 
@@ -80,7 +80,7 @@ spring:
   application:
     name: cce-scheduler-service
   datasource:
-    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5433}/${DB_NAME:cce_collector}
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5433}/${DB_NAME:ccedb}
     username: ${DB_USERNAME:cce_user}
     password: ${DB_PASSWORD:cce_pass}
     hikari:
@@ -142,7 +142,7 @@ management:
 | `SERVER_PORT` | `8083` | HTTP port (actuator only) |
 | `DB_HOST` | `localhost` | PostgreSQL host |
 | `DB_PORT` | `5433` | PostgreSQL port (shared with Collector Service) |
-| `DB_NAME` | `cce_collector` | Shared database name (all CCE services) |
+| `DB_NAME` | `ccedb` | Shared database name (all CCE services) |
 | `DB_USERNAME` | `cce_user` | Database username (shared with Collector Service) |
 | `DB_PASSWORD` | `cce_pass` | Database password (shared with Collector Service) |
 | `DB_POOL_SIZE` | `5` | HikariCP max pool size |
@@ -150,10 +150,11 @@ management:
 | `KAFKA_TOPIC_SCHEDULER_TRIGGERS` | `cce.scheduler.triggers` | Output Kafka topic |
 | `SCHEDULER_SCAN_INTERVAL` | `5000` | Scan interval in milliseconds |
 | `SCHEDULER_BATCH_SIZE` | `100` | Max steps per scan cycle |
-| `SCHEDULER_LEASE_DURATION` | `30` | Lease expiry in seconds |
-| `SCHEDULER_LEADER_RETRY` | `5000` | Leader retry interval in milliseconds |
+| `SCHEDULER_LEASE_DURATION` | `30` | Lease expiry in seconds; also the staleness window for pruning `scheduler_node` rows |
+| `SCHEDULER_LEADER_RETRY` | `5000` | Leader retry interval in milliseconds; also how often fair share is recomputed |
 | `SCHEDULER_LOCK_KEY` | `100001` | Base PostgreSQL advisory lock key. Partitions use keys `LOCK_KEY + 0` through `LOCK_KEY + TOTAL_PARTITIONS - 1`. |
-| `SCHEDULER_TOTAL_PARTITIONS` | `1` | Number of scan partitions for horizontal scaling. `1` = single-leader (default). |
+| `SCHEDULER_TOTAL_PARTITIONS` | `1` | Number of scan partitions for horizontal scaling. `1` = single-leader (default). Each instance owns at most its fair share, `ceil(TOTAL_PARTITIONS / live-instances)`. |
+| `SCHEDULER_LOCK_ACQUIRE_DELAY` | `50` | Max jitter (ms) between lock attempts to stagger simultaneous starts; even distribution is enforced by the fair-share cap, not this. `0` disables. |
 
 ## 4. Project Structure
 
@@ -243,7 +244,7 @@ docker build -t cce-scheduler-service .
 docker run -p 8083:8083 \
   -e DB_HOST=host.docker.internal \
   -e DB_PORT=5433 \
-  -e DB_NAME=cce_collector \
+  -e DB_NAME=ccedb \
   -e DB_USERNAME=cce_user \
   -e DB_PASSWORD=cce_pass \
   -e KAFKA_BOOTSTRAP_SERVERS=host.docker.internal:9092 \

@@ -49,46 +49,53 @@ sequenceDiagram
 
 ---
 
-## 2. Greedy Partitioned Leader Election Lifecycle
+## 2. Fair-Share Partitioned Leader Election Lifecycle
 
 ```mermaid
 flowchart TD
-    A["Service Startup"] --> B["Create dedicated<br/>JDBC connection"]
-    B --> C["ownedPartitions = []"]
-    C --> D{"For i in 0..totalPartitions-1"}
-    D --> D1["sleep(random(0, lockAcquireDelayMs))<br/>// micro-delay jitter for fair distribution"]
+    A["Service Startup"] --> B["Ensure dedicated<br/>JDBC connection"]
+    B --> HB["Upsert this node's heartbeat<br/>into scheduler_node"]
+    HB --> AC["activeNodes = fresh scheduler_node rows<br/>(prune stale rows)"]
+    AC --> FS["fairShare = ceil(totalPartitions / activeNodes)"]
+    FS --> REL{"held > fairShare?"}
+    REL -->|"Yes"| RELX["pg_advisory_unlock surplus<br/>(highest-indexed first)"]
+    RELX --> D
+    REL -->|"No"| D{"held < fairShare<br/>and free partition i?"}
+    D --> D1["sleep(random(0, lockAcquireDelayMs))<br/>// stagger simultaneous starts"]
     D1 --> D2{"pg_try_advisory_lock<br/>(lockKey + i)?"}
     D2 -->|"Acquired lock i"| E["Add i to ownedPartitions<br/>Update scheduler_lease row i"]
     E --> D
     D2 -->|"Lock held by other"| D
-    D -->|"All locks tried"| F{"ownedPartitions<br/>empty?"}
-    F -->|"Yes"| G["standby mode"]
+    D -->|"At fair share / none free"| F{"ownedPartitions<br/>empty?"}
+    F -->|"Yes"| G["standby mode<br/>(still heartbeats to scheduler_node)"]
     F -->|"No"| H["leader = true<br/>owns partitions list"]
 
     H --> I["Start scan loop<br/>(iterates all owned partitions)"]
 
     G --> J["Wait leaderRetryInterval"]
-    J --> D
+    J --> HB
 
     I --> K{"Scan cycle<br/>completed for<br/>all owned partitions?"}
     K -->|"Yes"| L["Update heartbeat<br/>for each owned partition"]
     L --> M["Wait fixedDelay"]
-    M --> K
+    M --> HB
 
     subgraph Shutdown
-        N["@PreDestroy"] --> O["Release ALL held<br/>advisory locks"]
-        O --> P["Close dedicated connection"]
+        N["@PreDestroy"] --> O["Release held advisory locks"]
+        O --> O2["Deregister from scheduler_node"]
+        O2 --> P["Close dedicated connection"]
     end
 
     subgraph Failover
         Q["Instance dies"] --> R["PG connection drops"]
-        R --> S["ALL advisory locks<br/>released automatically"]
-        S --> T["Surviving instances acquire<br/>orphaned locks on next retry"]
+        R --> S["ALL advisory locks released;<br/>scheduler_node row goes stale & pruned"]
+        S --> T["Survivors recompute larger fairShare,<br/>acquire orphaned locks on next retry"]
         T --> E
     end
 
     style H fill:#27AE60,color:white
     style G fill:#E67E22,color:white
+    style RELX fill:#2980B9,color:white
     style S fill:#E74C3C,color:white
     style T fill:#27AE60,color:white
 ```
@@ -184,7 +191,7 @@ graph LR
 
 ---
 
-## 5. Failover Scenario (Greedy Partition Redistribution)
+## 5. Failover Scenario (Fair-Share Partition Redistribution)
 
 ```mermaid
 sequenceDiagram
@@ -203,8 +210,9 @@ sequenceDiagram
 
     Note over L1: Instance A crashes
     L1--xPG: Connection drops
-    Note over PG: Advisory locks 100001 + 100002<br/>both auto-released
+    Note over PG: Advisory locks 100001 + 100002 auto-released;<br/>A's scheduler_node row goes stale & is pruned
 
+    Note over L2: activeNodes drops to 1 → fairShare = 3
     L2->>PG: pg_try_advisory_lock(100001)
     PG-->>L2: Lock acquired!
     L2->>PG: pg_try_advisory_lock(100002)
